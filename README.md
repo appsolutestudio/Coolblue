@@ -11,7 +11,7 @@ The project uses Swift 6 language mode and has no third-party dependencies.
 
 ## Architecture and decisions
 
-I chose MVVM to keep search behavior separate from the views. SwiftUI will handle presentation, while an `@Observable` view model will own the search state and coordinate requests. This gives the loading, error, and retry behavior a place to live that can be tested without launching the UI.
+I chose a small Clean Architecture structure with MVVM for presentation. The domain owns the product model without depending on SwiftUI or the API response format. The data layer decodes the API response and maps it into that model. MVVM keeps search behavior separate from the views. SwiftUI will handle presentation, while an `@Observable` view model will own the search state and coordinate requests. This gives the loading, error, and retry behavior a place to live that can be tested without launching the UI.
 
 Dependencies will be passed through initializers. The view model will depend on a small search service interface, so tests can provide responses directly without making network calls. For an app this size, a dependency injection framework would add little value.
 
@@ -27,7 +27,11 @@ Swift 6 language mode enables compile-time concurrency checks. The view model wi
 
 Search will run when the user submits a query. This keeps the interaction straightforward and avoids a request for every keystroke. Queries will be trimmed, and repeated submissions of the same in-flight query will not start another request.
 
-Prices will use `Decimal` rather than `Double` because they represent money. Decoding tests will check values such as `24.99` against an exact decimal value to verify that precision survives the JSON response.
+Prices use `Decimal` rather than `Double` because they represent money. Decoding tests compare `24.99` and `1042.99` against exact decimal values, including both prices in the supplied response fixture.
+
+The DTO requires an ID, name, price, and a complete review summary, matching the supplied response. The domain model also requires a review, so the same expectation holds from decoding through mapping. A summary with a count of zero represents no reviews. If a record cannot decode those fields, the request fails rather than quietly showing an incomplete list. Optional fields may be absent or null, but a present value with the wrong type still fails decoding. Missing delivery information stays unknown, so the UI can omit the delivery claim instead of treating it as unavailable.
+
+Image URLs must be absolute HTTP or HTTPS URLs with a host. This filters out relative paths and local file URLs before they reach the image loader. It does not guarantee that an image can be downloaded.
 
 Product images will have a placeholder for missing URLs or failed loads. An unavailable image should not prevent someone from browsing the results.
 
@@ -35,4 +39,4 @@ I chose to start with Apple's frameworks. SwiftUI, Foundation, and URLSession co
 
 ## Current status
 
-The project currently contains the initial app and test templates. The architecture above describes the approach chosen for the implementation. Product search is not implemented yet.
+The product model and API response mapping are implemented, with decoding tests for prices, required fields, optional details, and image URLs. The screen is still the initial template. Networking and the search view model are next.
