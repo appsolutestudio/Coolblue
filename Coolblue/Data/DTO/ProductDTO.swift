@@ -1,13 +1,5 @@
 import Foundation
 
-nonisolated struct ProductSearchResponse: Decodable, Sendable {
-    let products: [ProductDTO]
-    let currentPage: Int
-    let pageSize: Int
-    let totalResults: Int
-    let pageCount: Int
-}
-
 nonisolated struct ProductDTO: Decodable, Sendable {
     let productId: Int
     let productName: String

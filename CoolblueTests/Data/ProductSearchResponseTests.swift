@@ -4,10 +4,9 @@ import Testing
 
 struct ProductSearchResponseTests {
     @Test func decodesSuppliedFixture() throws {
-        let url = try #require(Bundle(for: FixtureBundle.self).url(
-            forResource: "product-search", withExtension: "json"
-        ))
-        let response = try JSONDecoder().decode(ProductSearchResponse.self, from: Data(contentsOf: url))
+        let response = try JSONDecoder().decode(
+            ProductSearchResponse.self, from: Fixtures.data(named: "product-search")
+        )
         let products = response.products.map { $0.toDomain() }
 
         #expect(products.count == 22)
@@ -184,9 +183,7 @@ struct ProductSearchResponseTests {
     }
 
     @Test func decodesEmptyResults() throws {
-        let response = try decode("""
-        {"products": [], "currentPage": 1, "pageSize": 24, "totalResults": 0, "pageCount": 0}
-        """)
+        let response = try JSONDecoder().decode(ProductSearchResponse.self, from: Fixtures.emptyPage)
         #expect(response.products.isEmpty)
     }
 
@@ -295,5 +292,3 @@ private extension ProductSearchResponseTests {
         try JSONDecoder().decode(ProductDTO.self, from: Data(json.utf8))
     }
 }
-
-private final class FixtureBundle {}
