@@ -11,29 +11,65 @@ struct ProductSearchView: View {
 
     var body: some View {
         NavigationStack {
-            searchContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .navigationTitle("Products")
-                .navigationBarTitleDisplayMode(.inline)
-                .searchable(
-                    text: $searchText,
-                    placement: .navigationBarDrawer(displayMode: .always),
-                    prompt: "Search products"
-                )
-                .searchFocused($isSearchFocused)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .onSubmit(of: .search) {
-                    isSearchFocused = false
-                }
-                .onChange(of: searchText) { _, newValue in
-                    model.search(query: newValue)
-                }
+            // Keep the field outside the changing state branches so it retains focus.
+            ZStack {
+                searchContent
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .navigationTitle("Products")
+            .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                searchBar
+            }
+            .onChange(of: searchText) { _, newValue in
+                model.search(query: newValue)
+            }
         }
+        .tint(CoolblueColors.contentBlue)
     }
 }
 
 private extension ProductSearchView {
+    var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(CoolblueColors.brandBlue)
+                .accessibilityHidden(true)
+
+            TextField("Search products", text: $searchText)
+                .textFieldStyle(.plain)
+                .focused($isSearchFocused)
+                .submitLabel(.search)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .padding(.vertical, 12)
+                .accessibilityIdentifier("productSearchField")
+                .onSubmit {
+                    isSearchFocused = false
+                }
+
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                    isSearchFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .accessibilityLabel("Clear search")
+                .accessibilityIdentifier("searchClearButton")
+            }
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
+        .frame(minHeight: 48)
+        .background(.background, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(CoolblueColors.brandBlue)
+    }
+
     @ViewBuilder
     var searchContent: some View {
         switch model.state {
@@ -71,6 +107,7 @@ private extension ProductSearchView {
     func productList(_ products: [Product]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Results for “\(model.query)”")
+                .accessibilityIdentifier("searchResultsHeading")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

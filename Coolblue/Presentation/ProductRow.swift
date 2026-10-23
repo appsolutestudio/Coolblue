@@ -59,11 +59,12 @@ private extension ProductRow {
         VStack(alignment: .leading, spacing: 8) {
             Text(product.name)
                 .font(.headline)
+                .foregroundStyle(CoolblueColors.contentBlue)
+
+            ProductReviewView(review: product.review)
 
             Text(product.price, format: .currency(code: "EUR"))
                 .font(.title3.bold())
-
-            reviewSummary
 
             ForEach(product.highlights.indices, id: \.self) { index in
                 Label(product.highlights[index], systemImage: "checkmark")
@@ -82,15 +83,6 @@ private extension ProductRow {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
-    }
-
-    var reviewSummary: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Review score: \(product.review.average, format: .number.precision(.fractionLength(0...1)))")
-            Text("Reviews: \(product.review.count, format: .number)")
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
     }
 }
 
