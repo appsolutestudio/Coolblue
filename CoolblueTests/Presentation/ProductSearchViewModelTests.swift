@@ -97,6 +97,52 @@ struct ProductSearchViewModelTests {
         #expect(await repository.requests.isEmpty)
     }
 
+    @Test(arguments: ["apple phone ", " apple  phone", "apple\t\nphone"])
+    func ignoresEquivalentWhitespaceAfterSearchCompletes(input: String) async throws {
+        let repository = ControlledProductSearchRepository()
+        var requests = repository.startedRequests.makeAsyncIterator()
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
+        let search = try #require(model.search(query: "apple phone"))
+        let request = try #require(await requests.next())
+        await repository.complete(request, with: .success(page([product(1)], count: 2)))
+        await search.value
+
+        #expect(model.search(query: input) == nil)
+        #expect(model.query == "apple phone")
+        #expect(model.state == .results([product(1)]))
+        #expect(model.nextPage == 2)
+        #expect(await repository.requests.count == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func unchangedQueryPreservesEmptyOrFailedState(fails: Bool) async throws {
+        let repository = ControlledProductSearchRepository()
+        var requests = repository.startedRequests.makeAsyncIterator()
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
+        let search = try #require(model.search(query: "apple"))
+        let request = try #require(await requests.next())
+        await repository.complete(
+            request, with: fails ? .failure(SearchFailure.unavailable) : .success(page([]))
+        )
+        await search.value
+
+        #expect(model.search(query: "apple ") == nil)
+        #expect(model.state == (fails ? .failed : .empty))
+        #expect(await repository.requests.count == 1)
+    }
+
+    @Test func normalizesWhitespaceBeforeSendingQuery() async throws {
+        let repository = ControlledProductSearchRepository()
+        var requests = repository.startedRequests.makeAsyncIterator()
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
+        let search = try #require(model.search(query: " \t apple   phone\n256 GB "))
+        let request = try #require(await requests.next())
+
+        #expect(request.query == "apple phone 256 GB")
+        await repository.complete(request, with: .success(page([product(1)])))
+        await search.value
+    }
+
     @Test func blankQueryClearsSearchAndInvalidatesPendingResponse() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
@@ -256,9 +302,6 @@ struct ProductSearchViewModelTests {
         #expect(model.nextPage == 2)
         #expect(!model.canLoadMore)
         #expect(model.loadNextPage() == nil)
-        model.cancel()
-        #expect(model.paginationState == .failed)
-        #expect(model.loadNextPage() == nil)
 
         let retry = try #require(model.retryNextPage())
         let retriedRequest = try #require(await requests.next())
@@ -333,7 +376,7 @@ struct ProductSearchViewModelTests {
     }
 
     @Test(arguments: [false, true], [false, true])
-    func cancellationClearsLoadingWithoutAnError(fromPagination: Bool, cancelsExplicitly: Bool) async throws {
+    func cancellationClearsLoadingWithoutAnError(fromPagination: Bool, cancelsTask: Bool) async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
         let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
@@ -346,11 +389,9 @@ struct ProductSearchViewModelTests {
             request = try #require(await requests.next())
         }
 
-        if cancelsExplicitly {
-            model.cancel()
+        if cancelsTask {
+            task.cancel()
             #expect(task.isCancelled)
-            #expect(model.state == (fromPagination ? .results([product(1)]) : .idle))
-            #expect(model.paginationState == .idle)
         }
         await repository.complete(request, with: .failure(CancellationError()))
         await task.value
@@ -360,16 +401,15 @@ struct ProductSearchViewModelTests {
         #expect(model.canLoadMore == fromPagination)
     }
 
-    @Test func explicitCancellationInvalidatesLateFailureAndAllowsResubmission() async throws {
+    @Test func cancelledRequestAllowsSameQueryToBeSearchedAgain() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
         let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let task = try #require(model.search(query: "apple"))
         let request = try #require(await requests.next())
 
-        model.cancel()
+        task.cancel()
         #expect(task.isCancelled)
-        #expect(model.state == .idle)
         await repository.complete(request, with: .failure(SearchFailure.unavailable))
         await task.value
         #expect(model.state == .idle)

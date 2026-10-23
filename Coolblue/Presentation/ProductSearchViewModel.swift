@@ -50,8 +50,9 @@ final class ProductSearchViewModel {
 extension ProductSearchViewModel {
     @discardableResult
     func search(query input: String) -> Task<Void, Never>? {
-        let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard query != self.query || requestTask == nil else { return nil }
+        let query = input.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        // Ignore equivalent input, but allow a cancelled nonempty search to restart from idle.
+        guard query != self.query || (state == .idle && !query.isEmpty) else { return nil }
 
         invalidateRequest()
         self.query = query
@@ -87,11 +88,6 @@ extension ProductSearchViewModel {
         guard paginationState == .failed, let nextPage else { return nil }
         paginationState = .loading
         return startRequest(page: nextPage)
-    }
-
-    func cancel() {
-        invalidateRequest()
-        restoreAfterCancellation()
     }
 }
 
