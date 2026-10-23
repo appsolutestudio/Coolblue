@@ -33,11 +33,13 @@ final class ProductSearchViewModel {
     }
 
     private let repository: any ProductSearchRepository
+    private let debounceDuration: Duration
     @ObservationIgnored private var requestTask: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
 
-    init(repository: any ProductSearchRepository) {
+    init(repository: any ProductSearchRepository, debounceDuration: Duration = .milliseconds(600)) {
         self.repository = repository
+        self.debounceDuration = debounceDuration
     }
 
     deinit {
@@ -62,13 +64,15 @@ extension ProductSearchViewModel {
         }
 
         state = .loading
-        return startRequest(page: 1)
+        return startRequest(page: 1, delay: debounceDuration)
     }
 
     @discardableResult
     func retrySearch() -> Task<Void, Never>? {
         guard state == .failed else { return nil }
-        return search(query: query)
+        invalidateRequest()
+        state = .loading
+        return startRequest(page: 1)
     }
 
     @discardableResult
@@ -99,7 +103,7 @@ private extension ProductSearchViewModel {
         requestTask = nil
     }
 
-    func startRequest(page: Int) -> Task<Void, Never> {
+    func startRequest(page: Int, delay: Duration = .zero) -> Task<Void, Never> {
         let generation = self.generation
         let query = self.query
         let repository = self.repository
@@ -107,6 +111,9 @@ private extension ProductSearchViewModel {
         let task = Task<Void, Never> { [weak self] in
             let result: Result<ProductSearchPage, any Error>
             do {
+                if delay > .zero {
+                    try await Task.sleep(for: delay)
+                }
                 try Task.checkCancellation()
                 result = .success(try await repository.search(query: query, page: page))
             } catch {
@@ -147,9 +154,10 @@ private extension ProductSearchViewModel {
     }
 
     func applySearchPage(_ loadedPage: ProductSearchPage) {
-        var knownIDs = Set(products.map(\.id))
+        let existingProducts = loadedPage.currentPage == 1 ? [] : products
+        var knownIDs = Set(existingProducts.map(\.id))
         let newProducts = loadedPage.products.filter { knownIDs.insert($0.id).inserted }
-        let mergedProducts = products + newProducts
+        let mergedProducts = existingProducts + newProducts
 
         state = mergedProducts.isEmpty ? .empty : .results(mergedProducts)
         nextPage = newProducts.isEmpty ? nil : loadedPage.nextPage

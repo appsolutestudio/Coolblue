@@ -15,7 +15,7 @@ I chose a small Clean Architecture structure with MVVM for presentation. The dom
 
 Dependencies are passed through initializers. The view model depends on a small repository interface in the domain layer, so tests can provide responses directly without making network calls. The data layer implements that interface with an injected base URL and `URLSession`, and returns domain products with their page metadata. The production base URL lives in `APIConfiguration`. The repository only adds the search path and query parameters, while tests supply a dummy host. For an app this size, a dependency injection framework would add little value.
 
-The app will stay in a single target, with files grouped by responsibility. Separate packages and extra layers can be useful in a larger codebase, but this assignment does not need them. The aim is to keep the boundaries clear and the code easy to follow.
+The app stays in a single app target, with files grouped by responsibility. Separate packages and extra layers can be useful in a larger codebase, but this assignment does not need them. The aim is to keep the boundaries clear and the code easy to follow.
 
 ### Platform and concurrency
 
@@ -29,9 +29,13 @@ The view model owns the request task, which captures it weakly so a pending requ
 
 ### Search and product data
 
-Search runs when the user submits a query. This keeps the interaction straightforward and avoids a request for every keystroke. The view model trims submitted queries, and repeated submissions of the same in-flight query do not start another request. Submitting a blank query clears the search without a request. The submitted query belongs to the view model, while the view will own the editable search text.
+Search runs after a 600 ms pause in typing. This gives someone more time between keystrokes before sending an intermediate query. Each query change cancels the previous delay or request and restarts the wait. The view model owns the delay and uses a suspending task, keeping the main actor available for typing and scrolling. Queries are trimmed, and repeated changes to the same in-flight query do not start another request. A blank query clears the search immediately. The active query belongs to the view model, while the view owns the editable search text.
+
+The screen uses SwiftUI's native search field and list. Editing a query clears the old results and shows the loading state while waiting or fetching. Clearing the field resets the search and cancels pending work. Covering the screen does not cancel its search, while releasing the view model cancels pending work. The keyboard's Search key dismisses the keyboard without bypassing the delay. The results heading sits above the list with its own space, rather than floating over scrolling rows. Pagination starts when the list's load-more footer appears, with a button available for manual loading. Initial and later-page failures have separate retry controls. Retries and pagination start immediately without the typing delay.
 
 Prices use `Decimal` rather than `Double` because they represent money. Decoding tests compare `24.99` and `1042.99` against exact decimal values, including both prices in the supplied response fixture.
+
+Prices are formatted as euros using the device's locale. The response has no currency field, so EUR is an assumption for this Dutch catalog. Reviews show the supplied score and count without converting the score to stars, since the API does not state its scale. A next-day delivery label is shown only when the API explicitly returns `true`.
 
 The DTO requires an ID, name, price, and a complete review summary. The domain model also requires a review, so that expectation holds through mapping.
 
@@ -45,13 +49,13 @@ Optional fields may be absent or null, but a present value with the wrong type s
 
 Image URLs must be absolute HTTP or HTTPS URLs with a host. This filters out relative paths and local file URLs before they reach the image loader. It does not guarantee that an image can be downloaded.
 
-Product images will have a placeholder for missing URLs or failed loads. An unavailable image should not prevent someone from browsing the results.
+Product images load with `AsyncImage`, with a placeholder for missing URLs or failed loads. An unavailable image does not prevent someone from browsing the results. Rows use system fonts and switch to a vertical layout at accessibility text sizes so the details have the full row width.
 
 I chose to start with Apple's frameworks. SwiftUI, Foundation, and URLSession cover the needs of this app without adding package dependencies.
 
 ### Search API
 
-Requests use GET with `query` and `page` parameters. The name `query` is an assumption because the supplied URL is incomplete and the mock does not distinguish between search terms or validate that parameter name. Search filtering therefore remains unverified.
+Requests use GET with `query` and `page` parameters. The name `query` is an assumption because the supplied URL is incomplete and the mock does not validate that parameter name. The brief explicitly says the mocked endpoint returns the same information for any search term. The app displays the returned products without adding local filtering, which would only cover pages already loaded.
 
 On 22 October 2026, live requests for pages 1, 2, and 3 returned matching `currentPage` values and 24, 24, and 22 products respectively. `totalResults` stayed at 70 and `pageCount` stayed at 3. The client starts at page 1 and always sends an explicit page number. A previous request without a page returned page 3.
 
@@ -59,6 +63,7 @@ On 22 October 2026, live requests for pages 1, 2, and 3 returned matching `curre
 
 The repository keeps no accumulated results or pagination state. The view model handles that:
 
+- Replace the product list when page 1 succeeds, and append only later pages.
 - Keep the first occurrence of each product ID in server order, removing duplicates both within a page and across previously loaded pages.
 - Stop automatic loading without showing an error when a successful page adds no new products.
 - Request page 1 for a new search, then request further pages only through `nextPage`.
@@ -66,7 +71,7 @@ The repository keeps no accumulated results or pagination state. The view model 
 - Ignore both success and failure responses from an invalidated search generation, including an earlier search with the same query.
 - Advance pagination only after accepting a successful response.
 
-An `unexpectedPage` error follows the same failure path as other request failures. An initial-search failure sets the error state. A later-page failure sets a separate pagination error state without discarding the current list. The screen will show “Couldn't load more products” with a retry control for that state. The view model does not switch on the data layer's error enum. A repeated failure remains available for manual retry and does not trigger an automatic retry loop. With the verified page count of 3, normal pagination does not request page 4.
+An `unexpectedPage` error follows the same failure path as other request failures. An initial-search failure sets the error state. A later-page failure sets a separate pagination error state without discarding the current list. The screen shows “Couldn't load more products” with a retry control for that state. The view model does not switch on the data layer's error enum. A repeated failure remains available for manual retry and does not trigger an automatic retry loop. With the verified page count of 3, normal pagination does not request page 4.
 
 Search requests have a 30-second inactivity timeout, a deliberate limit for this screen rather than relying on the 60-second default. This is not a strict deadline for the entire operation. The timeout is set on the request so it also applies to the injected session without changing how that session is created or owned.
 
@@ -74,4 +79,4 @@ Networking tests use an ephemeral URLSession with a custom URLProtocol. Each ses
 
 ## Current status
 
-The domain models, API mapping, search repository, and search view model are implemented. Tests cover decoding, requests, failures, cancellation, ordered deduplication, pagination retries, and stale responses. View model tests use a small controllable repository that deliberately allows late responses after cancellation. This checks behavior without network timing or sleeps. The screen is still the initial template. Connecting the view model to the search UI is next.
+The search screen is connected to the view model and live repository, with the dependencies assembled in `CoolblueApp`. It includes product images, prices, reviews, highlights, delivery information, pagination, and retry states. Unit tests cover decoding, requests, failures, cancellation, ordered deduplication, pagination retries, and stale responses. View model tests use a small controllable repository that deliberately allows late responses after cancellation. Most checks use request callbacks without relying on timing. The debounce test uses short pauses between query changes and verifies that only the final query reaches the repository after the full delay. UI tests are the next step.

@@ -5,9 +5,53 @@ import Testing
 @MainActor
 @Suite(.timeLimit(.minutes(1)))
 struct ProductSearchViewModelTests {
-    @Test func startsIdleAndIgnoresUnavailableActions() async {
+    @Test func debouncesRapidQueryChanges() async throws {
+        let repository = ControlledProductSearchRepository()
+        var requests = repository.startedRequests.makeAsyncIterator()
+        let model = ProductSearchViewModel(repository: repository)
+        let clock = ContinuousClock()
+
+        let first = try #require(model.search(query: "a"))
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await repository.requests.isEmpty)
+        let second = try #require(model.search(query: "ap"))
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await repository.requests.isEmpty)
+        let latestQueryChangedAt = clock.now
+        let latest = try #require(model.search(query: "apple"))
+        let request = try #require(await requests.next())
+
+        // Assert the minimum pause without imposing a scheduling deadline on CI.
+        #expect(latestQueryChangedAt.duration(to: clock.now) >= .milliseconds(600))
+        #expect(request.query == "apple")
+        #expect(request.page == 1)
+        #expect(await repository.requests.count == 1)
+        #expect(first.isCancelled)
+        #expect(second.isCancelled)
+
+        await repository.complete(request, with: .success(page([product(1)])))
+        await latest.value
+        await first.value
+        await second.value
+        #expect(model.state == .results([product(1)]))
+    }
+
+    @Test func clearingQueryCancelsPendingDebounceWithoutRequest() async throws {
         let repository = ControlledProductSearchRepository()
         let model = ProductSearchViewModel(repository: repository)
+        let pending = try #require(model.search(query: "apple"))
+
+        #expect(model.search(query: "") == nil)
+        #expect(model.state == .idle)
+        #expect(model.query.isEmpty)
+        #expect(pending.isCancelled)
+        await pending.value
+        #expect(await repository.requests.isEmpty)
+    }
+
+    @Test func startsIdleAndIgnoresUnavailableActions() async {
+        let repository = ControlledProductSearchRepository()
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
 
         #expect(model.state == .idle)
         #expect(model.products.isEmpty)
@@ -20,10 +64,10 @@ struct ProductSearchViewModelTests {
         #expect(await repository.requests.isEmpty)
     }
 
-    @Test func trimsSubmittedQueryAndIgnoresDuplicateInFlightSubmission() async throws {
+    @Test func trimsQueryAndIgnoresDuplicateInFlightSearch() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
 
         let task = try #require(model.search(query: " \n apple \t "))
         #expect(model.state == .loading)
@@ -45,7 +89,7 @@ struct ProductSearchViewModelTests {
     @Test(arguments: ["", " \n\t "])
     func ignoresBlankQuery(query: String) async {
         let repository = ControlledProductSearchRepository()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
 
         #expect(model.search(query: query) == nil)
         #expect(model.state == .idle)
@@ -53,10 +97,10 @@ struct ProductSearchViewModelTests {
         #expect(await repository.requests.isEmpty)
     }
 
-    @Test func blankSubmissionClearsSearchAndInvalidatesPendingResponse() async throws {
+    @Test func blankQueryClearsSearchAndInvalidatesPendingResponse() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let task = try #require(model.search(query: "apple"))
         let request = try #require(await requests.next())
 
@@ -75,7 +119,7 @@ struct ProductSearchViewModelTests {
     @Test func emptyResponseStopsPagination() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let task = try #require(model.search(query: "missing"))
         let request = try #require(await requests.next())
 
@@ -90,7 +134,7 @@ struct ProductSearchViewModelTests {
     @Test func retriesFailedInitialSearch() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let task = try #require(model.search(query: "apple"))
         let request = try #require(await requests.next())
 
@@ -115,7 +159,7 @@ struct ProductSearchViewModelTests {
     @Test func deduplicatesWithinAndAcrossPagesPreservingFirstOccurrenceAndOrder() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let first = product(2, name: "First occurrence")
         let duplicate = product(2, name: "Later occurrence")
         let search = try #require(model.search(query: "apple"))
@@ -145,11 +189,39 @@ struct ProductSearchViewModelTests {
         #expect(await repository.requests.count == 2)
     }
 
+    @Test func newSearchReplacesAllPreviouslyLoadedPages() async throws {
+        let repository = ControlledProductSearchRepository()
+        var requests = repository.startedRequests.makeAsyncIterator()
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
+        let initialSearch = try #require(model.search(query: "apple"))
+        let firstRequest = try #require(await requests.next())
+        await repository.complete(firstRequest, with: .success(page([product(1)], count: 2)))
+        await initialSearch.value
+
+        let loadMore = try #require(model.loadNextPage())
+        let secondRequest = try #require(await requests.next())
+        await repository.complete(secondRequest, with: .success(page([product(2)], current: 2, count: 2)))
+        await loadMore.value
+        #expect(model.products == [product(1), product(2)])
+
+        let newSearch = try #require(model.search(query: "phone"))
+        let newRequest = try #require(await requests.next())
+        let updatedProduct = product(2, name: "Updated product")
+        await repository.complete(
+            newRequest, with: .success(page([updatedProduct, product(3), product(3)]))
+        )
+        await newSearch.value
+
+        #expect(newRequest.page == 1)
+        #expect(model.products == [updatedProduct, product(3)])
+        #expect(model.nextPage == nil)
+    }
+
     @Test(arguments: [[], [1, 1]])
     func stopsWhenLaterPageAddsNoNewProducts(ids: [Int]) async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let search = try #require(model.search(query: "apple"))
         let firstRequest = try #require(await requests.next())
         await repository.complete(firstRequest, with: .success(page([product(1)], count: 3)))
@@ -169,7 +241,7 @@ struct ProductSearchViewModelTests {
     @Test func failedPageRetainsProductsAndRequiresExplicitRetryForSamePage() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let search = try #require(model.search(query: "apple"))
         let firstRequest = try #require(await requests.next())
         await repository.complete(firstRequest, with: .success(page([product(1)], count: 3)))
@@ -207,7 +279,7 @@ struct ProductSearchViewModelTests {
         // This fake deliberately ignores cancellation, so late completions reach the view model.
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         var oldTask = try #require(model.search(query: "old"))
         var oldRequest = try #require(await requests.next())
         if fromPagination {
@@ -240,7 +312,7 @@ struct ProductSearchViewModelTests {
     @Test func generationRejectsOlderResponseForSameQuery() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let first = try #require(model.search(query: "apple"))
         let firstRequest = try #require(await requests.next())
         let second = try #require(model.search(query: "banana"))
@@ -264,7 +336,7 @@ struct ProductSearchViewModelTests {
     func cancellationClearsLoadingWithoutAnError(fromPagination: Bool, cancelsExplicitly: Bool) async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         var task = try #require(model.search(query: "apple"))
         var request = try #require(await requests.next())
         if fromPagination {
@@ -291,7 +363,7 @@ struct ProductSearchViewModelTests {
     @Test func explicitCancellationInvalidatesLateFailureAndAllowsResubmission() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let task = try #require(model.search(query: "apple"))
         let request = try #require(await requests.next())
 
@@ -313,7 +385,7 @@ struct ProductSearchViewModelTests {
     func directlyCancelledTaskIgnoresLateCompletion(fails: Bool) async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let task = try #require(model.search(query: "apple"))
         let request = try #require(await requests.next())
 
@@ -332,7 +404,7 @@ struct ProductSearchViewModelTests {
 
     @Test func cancellationBeforeTaskStartsAvoidsRequest() async throws {
         let repository = ControlledProductSearchRepository()
-        let model = ProductSearchViewModel(repository: repository)
+        let model = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         let task = try #require(model.search(query: "apple"))
 
         task.cancel()
@@ -345,7 +417,7 @@ struct ProductSearchViewModelTests {
     @Test func releasingViewModelCancelsRequestWithoutRetainingModel() async throws {
         let repository = ControlledProductSearchRepository()
         var requests = repository.startedRequests.makeAsyncIterator()
-        var model: ProductSearchViewModel? = ProductSearchViewModel(repository: repository)
+        var model: ProductSearchViewModel? = ProductSearchViewModel(repository: repository, debounceDuration: .zero)
         weak let weakModel = model
         let task = try #require(model?.search(query: "apple"))
         let request = try #require(await requests.next())
