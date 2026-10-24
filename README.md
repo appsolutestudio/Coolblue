@@ -1,86 +1,41 @@
 # Coolblue
 
-My take on the Coolblue iOS assignment: a SwiftUI app for searching and browsing products.
+A SwiftUI app for searching and browsing products, with images, prices, reviews, pagination, and retry states.
 
 ## Requirements
 
-- Xcode 26.2
-- iOS 26.2 or later
+Xcode 26.2 and iOS 26.2 or later. The project uses Swift 6 and has no third-party dependencies.
 
-The project uses Swift 6 language mode and has no third-party dependencies.
+## Architecture
 
-## Architecture and decisions
+I used MVVM with lightweight Clean Architecture and constructor-based dependency injection, split into Domain, Data, and Presentation. The domain defines products and the repository interface. DTOs handle decoding and mapping in the data layer. The view model owns search and pagination state, leaving the views to render it.
 
-I chose a small Clean Architecture structure with MVVM for presentation. The domain owns the product model without depending on SwiftUI or the API response format. The data layer decodes the API response and maps it into that model. MVVM keeps search behavior separate from the views. An `@Observable` view model owns the search state and coordinates requests, leaving presentation to SwiftUI. This gives the loading, error, and retry behavior a place to live that can be tested without launching the UI.
+Dependencies are passed through initializers. `AppDependencies` assembles each search screen's view model and repository, and selects the fake repository for UI tests in Debug builds. The base URL lives in `APIConfiguration`. A single app target keeps the structure straightforward for this scope.
 
-Dependencies are passed through initializers. The view model depends on a small repository interface in the domain layer, so tests can provide responses directly without making network calls. The data layer implements that interface with an injected base URL and `URLSession`, and returns domain products with their page metadata. The app entry point owns the scene, while `AppDependencies` creates the search view model and its repository. Each search screen gets a new view model and repository, including fresh retry state in UI test scenarios. Views and view models receive their dependencies directly and do not access `AppDependencies`. The production base URL lives in `APIConfiguration`. The repository only adds the search path and query parameters, while tests supply a dummy host. For an app this size, a dependency injection framework would add little value.
+The view model runs on `MainActor`. The repository uses `@concurrent` to handle requests, decoding, and mapping away from the main actor. Data types and mapping extensions are `nonisolated`, and each request creates its own decoder. Cancellation stops superseded work, while a generation check prevents late responses from changing the active search. Request tasks capture the view model weakly and are cancelled when it is released.
 
-The app stays in a single app target, with files grouped by responsibility. Separate packages and extra layers can be useful in a larger codebase, but this assignment does not need them. The aim is to keep the boundaries clear and the code easy to follow.
+## Search behavior
 
-### Platform and concurrency
+Search starts after a 600 ms pause in typing. Whitespace is normalized, so adding a trailing space does not trigger another request. Clearing the field cancels pending work and resets the screen. Retries and pagination skip the typing delay. The keyboard's Search key dismisses the keyboard.
 
-The assignment does not specify a minimum iOS version. I chose iOS 26.2 to match the newest SDK installed for this project and use modern SwiftUI APIs without compatibility branches. The trade-off is that the app will not run on older iOS versions.
+A new search replaces the results. Later pages append unique product IDs in server order. Loading stops at the reported page count or when a page adds no new products. A failed page keeps existing results and offers an explicit retry, without automatically repeating the request.
 
-Swift 6 language mode enables compile-time concurrency checks. The view model is isolated to the main actor. The repository uses `@concurrent` so request handling, decoding, and mapping run on the generic executor even when called from the main actor. Each request creates its own decoder. The data types and mapping extensions are explicitly `nonisolated`.
+The search field sits at the bottom for easier reach and moves above the keyboard. Rows adapt to accessibility text sizes. Review labels announce the score and count, and missing or failed images show a placeholder.
 
-Cancellation is checked before starting a request and before returning the mapped result. URLSession handles cancellation while awaiting the network response. URLSession cancellation is converted to `CancellationError`, giving callers one cancellation case to handle. Other transport errors and decoding errors pass through without being replaced. Starting a new search cancels the previous request and invalidates its result in the view model, so a late response cannot overwrite the current search.
+## API observations and assumptions
 
-The view model owns the request task, which captures it weakly so a pending request does not keep the screen's model alive. Cancellation clears loading indicators while retaining products already loaded. Releasing the model cancels its request. Cancellation does not produce an error state.
+The brief states that the mock returns the same products for every search term. The app displays those responses without local filtering. Requests send `query` and `page`, although the mock does not confirm the query parameter name.
 
-### Search and product data
+On 22 October 2026, pages 1 to 3 returned 24, 24, and 22 products, with matching page numbers and stable totals of 70 products across 3 pages. Page 4 returned HTTP 200 with page 3's content. The repository rejects mismatched page numbers.
 
-Search runs after a 600 ms pause in typing. This gives someone more time between keystrokes before sending an intermediate query. A meaningful query change cancels the previous delay or request and restarts the wait. The view model owns the delay and uses a suspending task, keeping the main actor available for typing and scrolling. Leading and trailing whitespace is removed, and runs of whitespace become a single space. The same normalized query does not start another request, even after results, an empty response, or an error. Adding a trailing space therefore leaves the current screen and pagination intact. Failed requests have explicit retry buttons. A blank query clears the search immediately. The active query belongs to the view model, while the view owns the editable search text.
+All 70 products had a complete review summary. Reviews are therefore required in both the DTO and domain model. This is an assumption about the mock, not a guarantee about a real catalog. A malformed required field fails the whole page. In production, I would confirm the schema and consider per-product decoding with logging for malformed records.
 
-The search field sits at the bottom in a safe-area inset so it is easier to reach with one hand. It moves above the keyboard, and its clear button has a 44-point touch target. Capitalization and autocorrection settings apply directly to the field. Editing a meaningful query clears the old results and shows the loading state while waiting or fetching. Clearing the field resets the search and cancels pending work. Covering the screen does not cancel its search, while releasing the view model cancels pending work. The keyboard's Search key dismisses the keyboard without bypassing the delay. The results heading sits above the list with its own space, rather than floating over scrolling rows. Pagination starts when the list's load-more footer appears, with a button available for manual loading. Initial and later-page failures have separate retry controls. Retries and pagination start immediately without the typing delay.
+Prices use `Decimal`, with exact decoding tests for fractional values. EUR and a 10-point review scale are assumptions. The UI converts scores into five partially filled badges and announces the original score out of 10. Delivery information remains optional and is shown only when explicitly true.
 
-Prices use `Decimal` rather than `Double` because they represent money. Decoding tests compare `24.99` and `1042.99` against exact decimal values, including both prices in the supplied response fixture.
+## Verification and scope
 
-Prices are formatted as euros using the device's locale. The response has no currency field, so EUR is an assumption for this Dutch catalog. Reviews use five green circular star badges and a review count, following the supplied Coolblue app reference. Coolblue's product pages show scores out of 10 alongside five-star reviews, so the displayed fill is the API average divided by two. That scale remains an assumption about this mock's undocumented field. Partial badges preserve the supplied average, and VoiceOver reads the original score out of 10 and the review count. A product with zero reviews shows “No reviews”. A next-day delivery label is shown only when the API explicitly returns `true`.
+Unit tests cover decoding, request construction, cancellation, stale responses, debounce, deduplication, and pagination retries. Ten UI tests use fixed scenarios for search, focus, clearing, empty results, retry flows, pagination, and low review scores. They avoid live network calls and layout-coordinate assertions.
 
-The blue search area uses Coolblue's `#0090E3`. Text and buttons use a darker blue in light mode and a lighter blue in dark mode for contrast. Review badges use a darker green than the reference so the white star remains clear. Colors live in the asset catalog and use Xcode's generated resource symbols so missing names are caught during compilation. System fonts and standard SwiftUI controls keep Dynamic Type and accessibility behavior familiar.
+Unit tests pass in a local harness. App and UI test sources compile and link, and Release sources type-check. The latest UI test fixes still need a final simulator run.
 
-The DTO requires an ID, name, price, and a complete review summary. The domain model also requires a review, so that expectation holds through mapping.
-
-On 22 October 2026, I checked all three live pages, containing 24, 24, and 22 products. All 70 unique products included `reviewInformation.reviewSummary`, a numeric `reviewAverage`, and an integer `reviewCount`. None had a review count of zero. This supports the strict model for the current mock data. It remains an assumption about the schema, not a guarantee about real catalog data or products without reviews.
-
-One malformed required field fails the whole page. For an initial search, the result is an error state instead of a partial product list. This is deliberate for the assignment: report bad data rather than silently hide it. A later-page failure retains products already loaded and allows a retry for the failed page.
-
-In production, I would confirm the schema first and model absent review data explicitly if the API permits it. For malformed records, I would consider decoding products individually with logging and monitoring, so valid products remain available and discarded records are visible to the team.
-
-Optional fields may be absent or null, but a present value with the wrong type still fails decoding. Missing delivery information stays unknown, so the UI can omit the delivery claim instead of treating it as unavailable.
-
-Image URLs must be absolute HTTP or HTTPS URLs with a host. This filters out relative paths and local file URLs before they reach the image loader. It does not guarantee that an image can be downloaded.
-
-Product images load with `AsyncImage`, with a placeholder for missing URLs or failed loads. An unavailable image does not prevent someone from browsing the results. Rows use system fonts and switch to a vertical layout at accessibility text sizes so the details have the full row width.
-
-I chose to start with Apple's frameworks. SwiftUI, Foundation, and URLSession cover the needs of this app without adding package dependencies.
-
-### Search API
-
-Requests use GET with `query` and `page` parameters. The name `query` is an assumption because the supplied URL is incomplete and the mock does not validate that parameter name. The brief explicitly says the mocked endpoint returns the same information for any search term. The app displays the returned products without adding local filtering, which would only cover pages already loaded.
-
-On 22 October 2026, live requests for pages 1, 2, and 3 returned matching `currentPage` values and 24, 24, and 22 products respectively. `totalResults` stayed at 70 and `pageCount` stayed at 3. The client starts at page 1 and always sends an explicit page number. A previous request without a page returned page 3.
-
-`ProductSearchPage.nextPage` stops at the reported page count, so the client does not need to probe beyond the last page. The repository rejects a response whose `currentPage` differs from the requested page. Pagination totals were stable in the captured responses, but the repository does not assume they remain fixed across requests. On the same date, requesting page 4 returned HTTP 200 with the exact page-3 response, including `currentPage: 3` and the same 22 products. The page-number guard rejects that response if page 4 is requested.
-
-The repository keeps no accumulated results or pagination state. The view model handles that:
-
-- Replace the product list when page 1 succeeds, and append only later pages.
-- Keep the first occurrence of each product ID in server order, removing duplicates both within a page and across previously loaded pages.
-- Stop automatic loading without showing an error when a successful page adds no new products.
-- Request page 1 for a new search, then request further pages only through `nextPage`.
-- Pause automatic loading after any failed page request, keep existing products, and show a retry control for that page only. Loading resumes only after an explicit retry or a new search.
-- Ignore both success and failure responses from an invalidated search generation, including an earlier search with the same query.
-- Advance pagination only after accepting a successful response.
-
-An `unexpectedPage` error follows the same failure path as other request failures. An initial-search failure sets the error state. A later-page failure sets a separate pagination error state without discarding the current list. The screen shows “Couldn't load more products” with a retry control for that state. The view model does not switch on the data layer's error enum. A repeated failure remains available for manual retry and does not trigger an automatic retry loop. With the verified page count of 3, normal pagination does not request page 4.
-
-Search requests have a 30-second inactivity timeout, a deliberate limit for this screen rather than relying on the 60-second default. This is not a strict deadline for the entire operation. The timeout is set on the request so it also applies to the injected session without changing how that session is created or owned.
-
-Networking tests use an ephemeral URLSession with a custom URLProtocol. Each session has its own stub registration, with shared state protected by a mutex so tests can run in parallel. Cancellation tests wait for request callbacks rather than relying on delays.
-
-UI tests select a fixed repository through the `UI_TEST_SCENARIO` launch environment value. That selection lives in the app's composition root and is compiled only in Debug, so the views and view model use the same dependency interface as normal. The scenarios provide results, an empty page, failures that succeed on retry, and review scores of 1, 3, and 5 out of 10. They use no network or image requests. Mutable retry state belongs to an actor, and each app launch starts with fresh state. Scenario tests skip the typing delay. The live-search and focus tests set `UI_TEST_REAL_DEBOUNCE` to keep the production delay enabled. The tests wait for UI elements rather than sleeping, and cover searching without submitting, clearing the field, empty results, search retry, scrolling through pages, and pagination retry. A focus regression test taps the field once, then types individual letters across completed searches without tapping again. Low-rating cases check the announced score and count and attach a screenshot of each row. Unit tests check the actual badge-fill values used by the view. The results test also checks that the heading sits above the first product.
-
-## Current status
-
-The search screen is connected to the view model and live repository, with the dependencies assembled in `AppDependencies`. It includes product images, prices, reviews, highlights, delivery information, pagination, and retry states. Unit tests cover decoding, requests, failures, cancellation, ordered deduplication, pagination retries, and stale responses. View model tests use a small controllable repository that deliberately allows late responses after cancellation. Most checks use request callbacks without relying on timing. The debounce test uses short pauses between query changes and verifies that only the final query reaches the repository after the full delay. Ten UI tests cover search, keyboard focus, pagination, and low review scores. Their simulator run is still pending because CoreSimulator is unavailable in the implementation environment.
+I kept the scope to search and browsing. Product details, a dedicated image cache, and error-specific messaging are left out.

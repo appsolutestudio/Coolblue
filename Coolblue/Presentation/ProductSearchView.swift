@@ -91,6 +91,7 @@ private extension ProductSearchView {
         case .failed:
             ContentUnavailableView {
                 Label("Couldn't load products", systemImage: "exclamationmark.triangle")
+                    .accessibilityIdentifier("searchError")
             } description: {
                 Text("Results for “\(model.query)” couldn't be loaded. Please try again.")
             } actions: {
@@ -100,7 +101,6 @@ private extension ProductSearchView {
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("searchRetryButton")
             }
-            .accessibilityIdentifier("searchError")
         }
     }
 

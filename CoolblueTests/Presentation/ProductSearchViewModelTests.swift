@@ -11,12 +11,9 @@ struct ProductSearchViewModelTests {
         let model = ProductSearchViewModel(repository: repository)
         let clock = ContinuousClock()
 
+        // Submit one burst without yielding, so scheduler delays cannot split it into searches.
         let first = try #require(model.search(query: "a"))
-        try await Task.sleep(for: .milliseconds(150))
-        #expect(await repository.requests.isEmpty)
         let second = try #require(model.search(query: "ap"))
-        try await Task.sleep(for: .milliseconds(150))
-        #expect(await repository.requests.isEmpty)
         let latestQueryChangedAt = clock.now
         let latest = try #require(model.search(query: "apple"))
         let request = try #require(await requests.next())

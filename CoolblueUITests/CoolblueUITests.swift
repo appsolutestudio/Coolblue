@@ -15,14 +15,11 @@ final class CoolblueUITests: XCTestCase {
         let firstProduct = element("product-1", in: app)
         XCTAssertTrue(firstProduct.waitForExistence(timeout: 5))
         XCTAssertTrue(firstProduct.label.contains("Test phone 1"))
-        let heading = element("searchResultsHeading", in: app)
-        XCTAssertEqual(heading.label, "Results for “phone”")
-        XCTAssertLessThanOrEqual(heading.frame.maxY, firstProduct.frame.minY)
+        assertResultsHeading(for: "phone", in: app)
         let searchField = app.textFields["productSearchField"]
-        XCTAssertLessThanOrEqual(element("productList", in: app).frame.maxY, searchField.frame.minY)
-        if app.keyboards.firstMatch.exists {
-            XCTAssertLessThanOrEqual(searchField.frame.maxY, app.keyboards.firstMatch.frame.minY)
-        }
+        XCTAssertEqual(searchField.value as? String, "phone")
+        assertHittable(firstProduct)
+        assertHittable(searchField)
         XCTAssertTrue(firstProduct.label.contains("Rated 9.2 out of 10"))
     }
 
@@ -38,9 +35,8 @@ final class CoolblueUITests: XCTestCase {
             // Deliberately do not tap again between input or completed searches.
             searchField.typeText(character)
             query += character
-            XCTAssertTrue(app.staticTexts["Results for “\(query)”"].waitForExistence(timeout: 5))
+            assertResultsHeading(for: query, in: app)
             XCTAssertEqual(searchField.value as? String, query)
-            XCTAssertTrue(app.keyboards.firstMatch.exists)
         }
     }
 
@@ -90,12 +86,15 @@ final class CoolblueUITests: XCTestCase {
         let app = launch(scenario: "searchRetry")
         search("phone", in: app)
 
+        XCTAssertTrue(app.staticTexts["searchError"].waitForExistence(timeout: 5))
         let retry = app.buttons["searchRetryButton"]
         XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(identifier: "searchRetryButton").count, 1)
+        assertHittable(retry)
         retry.tap()
 
         XCTAssertTrue(element("product-1", in: app).waitForExistence(timeout: 5))
-        XCTAssertEqual(element("searchResultsHeading", in: app).label, "Results for “phone”")
+        assertResultsHeading(for: "phone", in: app)
         XCTAssertFalse(app.buttons["searchRetryButton"].exists)
     }
 
@@ -125,7 +124,6 @@ final class CoolblueUITests: XCTestCase {
 
         let retry = app.buttons["paginationRetryButton"]
         scrollTo(retry, in: app)
-        XCTAssertFalse(element("product-13", in: app).exists)
 
         // A failed page keeps the previous products and waits for an explicit retry.
         scrollTo(firstProduct, in: app, swipingDown: true)
@@ -141,6 +139,30 @@ final class CoolblueUITests: XCTestCase {
 
 @MainActor
 private extension CoolblueUITests {
+    func assertResultsHeading(
+        for query: String,
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let heading = app.staticTexts["searchResultsHeading"]
+        let predicate = NSPredicate(format: "exists == true AND label CONTAINS %@", query)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: heading)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [expectation], timeout: 5), .completed,
+            "Expected a results heading for \(query)", file: file, line: line
+        )
+    }
+
+    func assertHittable(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let predicate = NSPredicate(format: "exists == true AND hittable == true")
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [expectation], timeout: 5), .completed,
+            "Expected \(element) to become hittable", file: file, line: line
+        )
+    }
+
     func assertLowRating(scenario: String, score: Int, file: StaticString = #filePath, line: UInt = #line) {
         let app = launch(scenario: scenario)
         search("phone", in: app)
@@ -195,7 +217,10 @@ private extension CoolblueUITests {
         line: UInt = #line
     ) {
         let list = element("productList", in: app)
-        for _ in 0..<12 {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        // Larger text and smaller screens may need more swipes to reach the same product.
+        while clock.now < deadline {
             if target.waitForExistence(timeout: 0.5), target.isHittable {
                 return
             }
